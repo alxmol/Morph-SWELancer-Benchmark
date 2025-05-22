@@ -253,9 +253,9 @@ class MorphConfig:
         
         with instance.ssh() as ssh:
             # Clone the repo
-            print("Cloning SWELancer repository...")
+            print("Cloning Alex's SWELancer repository...")
             ssh.run(["rm", "-rf", "SWELancer-Benchmark"]).raise_on_error()  # Remove if exists
-            clone_result = ssh.run(["git", "clone", "https://github.com/openai/SWELancer-Benchmark.git"], timeout=60)
+            clone_result = ssh.run(["git", "clone", "https://github.com/alxmol/SWELancer-Benchmark.git"], timeout=60)
             if clone_result.exit_code != 0:
                 print(f"Error cloning repository: {clone_result.stderr}")
                 raise RuntimeError(f"Failed to clone repository: {clone_result.stderr}")
