@@ -348,7 +348,7 @@ class SWELancerEval(PythonCodingEval):
                             'question_id': task.question_id,
                             'attempt_id': task.attempt_id,
                             'retry_idx': task.retry_idx,
-                            'conversation': strip_all_metadata(step.convo)
+                            'conversation': strip_all_metadata(step.convo).model_dump(mode="json") if step.convo else None
                         }
                         f.write(json.dumps(log_entry) + '\n')
 

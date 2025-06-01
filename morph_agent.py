@@ -15,11 +15,28 @@ from nanoeval.solvers.computer_tasks.solver import PythonCodingEval
 from nanoeval.solvers.computer_tasks.steps import FinalResult, FinalResultSuccessful, FinalResultWithException, Step
 from nanoeval.solvers.computer_tasks.task import ComputerTask, Grade
 from morphcloud.api import MorphCloudClient
+from datetime import datetime, timezone, timedelta
 
 # Import from our modular components
 from morph_utils import safe_decode, get_model_response, COLORS
 from morph_config import MorphCloudValue, task_to_morph_config
 from morph_interface import MorphCloudInterface
+
+# Minimal conversation container compatible with nanoeval.strip_all_metadata
+from pydantic import BaseModel
+
+# Minimal message & conversation wrappers so strip_all_metadata succeeds
+
+
+class _SimpleMessage(BaseModel):
+    role: str
+    content: str
+    metadata: dict[str, Any] = {}
+
+
+class _SimpleConversation(BaseModel):
+    messages: list[_SimpleMessage] = []
+    metadata: dict[str, Any] = {}
 
 @chz.chz
 class SimpleAgentSolver(PythonCodingSolver):
@@ -229,6 +246,14 @@ class SimpleAgentSolver(PythonCodingSolver):
         try:
             print(f"{COLORS['GREEN']}Running with MorphCloud!{COLORS['RESET']}")
             async with self._with_cached_setup(task) as computer:
+                # === Attach terminal logging ===
+                # Create conversation_logs dir on host and open a log file that the
+                # MorphCloudInterface can write to. We store the handle on the
+                # interface instance so that send_shell_command() can append.
+                os.makedirs("conversation_logs", exist_ok=True)
+                term_log_path = f"conversation_logs/{task.question_id}_{task.attempt_id}_{task.retry_idx}_terminal.log"
+                # Open in append mode so repeated attempts don't clobber.
+                computer._terminal_log_file = open(term_log_path, "a", encoding="utf-8")  # type: ignore[attr-defined]
 
                 print(f"{COLORS['GREEN']}Agent Loop Started!{COLORS['RESET']}")
                 # 2. Query the API / some agent
@@ -331,9 +356,62 @@ Please note that the Python code is not a Jupyter notebook; you must write a ful
                         "content": f"{execution_output}\nTurns left: {remaining_turns - 1}"
                     })
 
+                    # Convert raw dict messages into _SimpleMessage objects
+                    _msg_objs = [_SimpleMessage(**m) for m in messages]
+                    yield Step(convo=_SimpleConversation(messages=_msg_objs), grade=None, elapsed=timedelta(0))
+
                 # 3. Grade and yield the final result
                 print(f"Agent loop exited: {loop_exit_reason}")
                 grade = await task.grade(computer)
+
+                # === Persist patch diff to host ===
+                patch_file_path = f"conversation_logs/{task.question_id}_{task.attempt_id}_{task.retry_idx}_patch.diff"
+                patch_content = None
+                error_message = None
+
+                try:
+                    # Attempt to download the patch file created by task.grade()
+                    patch_bytes = await computer.download("/tmp/patch.diff")
+
+                    if patch_bytes is not None: # Check if download returned something (even if empty bytes)
+                        if len(patch_bytes) > 0:
+                            patch_content = patch_bytes
+                        else:
+                            # Downloaded successfully, but the patch itself is empty (no changes)
+                            patch_content = b"# Agent made no discernible code changes."
+                    else:
+                        # This case implies computer.download might return None on certain errors
+                        # or if the file truly doesn't exist and it doesn't raise an exception.
+                        # Most download implementations would raise or return empty bytes for non-existent file.
+                        # We'll primarily rely on the except block for file-not-found, but handle None defensively.
+                        error_message = "# Patch file /tmp/patch.diff was not found or download returned None (unexpected)."
+
+                except Exception as e:
+                    # This catches errors from computer.download() (e.g., file not found for non-IC SWE tasks, permission issues)
+                    # or any other unexpected error during the download attempt.
+                    print(f"Info: Error retrieving patch file for task {task.question_id}: {str(e)}")
+                    error_message = f"# Error retrieving patch file: {str(e)}"
+
+                # Now, write to the host file based on what was determined
+                try:
+                    with open(patch_file_path, "wb") as pf: # Open in binary mode for bytes
+                        if patch_content is not None:
+                            pf.write(patch_content)
+                        elif error_message is not None:
+                            pf.write(error_message.encode('utf-8')) # Write error message as bytes
+                        else:
+                            # Should not happen if logic is correct, but as a fallback, create empty or default error.
+                            pf.write(b"# Unknown status or error during patch processing.")
+                except IOError as ioe:
+                    print(f"Critical: Failed to write to host patch file {patch_file_path}: {str(ioe)}")
+
+                # Close terminal log file if present
+                if hasattr(computer, "_terminal_log_file") and computer._terminal_log_file is not None:  # type: ignore[attr-defined]
+                    try:
+                        computer._terminal_log_file.close()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
                 yield FinalResultSuccessful(grade=grade)
         except Exception as e:
             print(f"Error: {e}")

@@ -111,6 +111,26 @@ class MorphCloudInterface:
         if cmd != "cd /app/tests && zip -P 'secretpasswordhere' -r /app/tmp.zip . && mv /app/tmp.zip /app/tests.zip":
             print(f"cmd {cmd} -> ({result.exit_code}) {combined_output.decode('utf-8', errors='backslashreplace')}")
         
+        # === Terminal logging hook ===
+        # If a file handle was attached (by the Solver), stream both the command and
+        # its combined output to that file. Use a simple human-readable format so
+        # that the log is append-only and chronological. We deliberately avoid
+        # any expensive locking here because the current benchmark runs with
+        # concurrency=1, but we still guard against missing handles.
+        if hasattr(self, "_terminal_log_file") and self._terminal_log_file is not None:  # type: ignore[attr-defined]
+            try:
+                log_fh = self._terminal_log_file  # type: ignore[attr-defined]
+                log_fh.write("\n=== COMMAND ===\n")
+                log_fh.write(cmd + "\n")
+                log_fh.write("--- EXIT CODE: " + str(result.exit_code) + " ---\n")
+                # Decode bytes to utf-8, but preserve any undecodable bytes.
+                decoded = combined_output.decode("utf-8", errors="backslashreplace")
+                log_fh.write(decoded + "\n=== END ===\n")
+                log_fh.flush()
+            except Exception as _e:
+                # Don't crash on logging failure; just continue silently.
+                pass
+        
         # Return in the correct format for compatibility
         return ExecutionResult(
             output=combined_output,
